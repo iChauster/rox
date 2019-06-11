@@ -1,5 +1,6 @@
 import click
 from click import echo, secho
+from bson.objectid import ObjectId
 import os
 import json
 from bigchaindb_driver import BigchainDB
@@ -7,6 +8,7 @@ from bigchaindb_driver.crypto import generate_keypair, CryptoKeypair
 import requests
 import ipfsapi
 import time
+from pymongo import MongoClient
 from encryption import *
 bdb = BigchainDB(
     'https://test.bigchaindb.com',
@@ -16,20 +18,21 @@ credentials_path = os.path.expanduser('~/.medblocks')
 version = '0.01'
 emergency_address = '3gk3RzXuchFZrHuPjQQb6Aeyevs16t6e2GnSh7qkTUJ1'
 
+client = MongoClient("mongodb://cr:iSTEM0@ds157735.mlab.com:57735/istem")
+transactions = client['istem']['transactions']
+
 @click.group()
 @click.version_option(version, message=version)
+
+
 def main():
     """
     \b
-    ███╗   ███╗███████╗██████╗ ██████╗ ██╗      ██████╗  ██████╗██╗  ██╗███████╗
-    ████╗ ████║██╔════╝██╔══██╗██╔══██╗██║     ██╔═══██╗██╔════╝██║ ██╔╝██╔════╝
-    ██╔████╔██║█████╗  ██║  ██║██████╔╝██║     ██║   ██║██║     █████╔╝ ███████╗
-    ██║╚██╔╝██║██╔══╝  ██║  ██║██╔══██╗██║     ██║   ██║██║     ██╔═██╗ ╚════██║
-    ██║ ╚═╝ ██║███████╗██████╔╝██████╔╝███████╗╚██████╔╝╚██████╗██║  ██╗███████║
-    ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝ 
+    ROX
     Store your medical records securely                                         
     """
-    
+
+
 def dump_user(user):
     """Converts user dictionary to json string"""
     bigchain_keys = user['bigchain']
@@ -70,18 +73,19 @@ def register_on_blockchain(string):
         'name':user_dict['name']
     }
     echo("[+] Preparing CREATE transaction with {}...".format(str(data)[:10]))
-    tx = bdb.transactions.prepare(
+    ''' tx = bdb.transactions.prepare(
     operation='CREATE',
     signers=user_dict['bigchain']['public_key'],
-    asset={'data': data})
+    asset={'data': data}) '''
 
     echo("[+] Signing with private key")
-    signed_tx = bdb.transactions.fulfill(
+    '''signed_tx = bdb.transactions.fulfill(
     tx,
     private_keys=user_dict['bigchain']['private_key']
-    )
+    )'''
     echo("[+] Sending to the Blockchain")
-    sent = bdb.transactions.send(signed_tx)
+    # sent = bdb.transactions.send(signed_tx)
+    sent = transactions.insert_one(data)
     echo("[+] Sent transaction {}".format(sent))
     return sent
     # mobile => address, rsa_key
@@ -90,16 +94,15 @@ def register_on_blockchain(string):
 
 
 
-def filter(l, key, value):
+def fil(l, key, value):
     new_list = []
-    for instance in l:
-        data = instance.get('data')
-        if data.get(key) == value:
-            new_list.append(instance)
+    for document in l:
+        if document[key] == value:
+            new_list.append(document)
     return new_list
 
 def version_filter(l):
-    return filter(l, 'version','v'+version)
+    return fil(l, 'version','v'+version)
     
     
 class Patient(object):
@@ -112,36 +115,40 @@ class Patient(object):
             self.bio = self.get_bio_from_public_key(public_key)
         self.medblocks = []
         self.non_keyed = []
-        self.get_medblocks()
+        if self.bio is not None :
+            self.get_medblocks()
         
     def get_bio_from_mobile(self, mobile):
-        records = bdb.assets.get(search=mobile)
-        records = filter(records, 'schema','medblocks.user')
+        # records = bdb.assets.get(search=mobile)
+        records = transactions.find({"phone": mobile})
+        records = fil(records, 'schema','medblocks.user')
         if len(records) == 1:
             echo("[+] Found user with mobile number!")
             self.registered = True
-            return records[0]['data']
+            return records[0]
         if len(records) > 1:
             secho("[o] Got more than one record for the same version. Last registery will be taken",fg='yellow')
             self.registered = True
-            return records[-1]['data']
+            return records[-1]
         
         secho("[-] No user with that phone number registered", fg='red')
         self.registered = False
         return
 
     def get_bio_from_public_key(self, public_key):
-        self.records = bdb.assets.get(search=public_key)
-        registers = filter(self.records, 'schema','medblocks.user')
+        # self.records = bdb.assets.get(search=public_key)
+        self.records = transactions.find({"bigchain": public_key})
+        registers = fil(self.records, 'schema', 'medblocks.user')
+
 
         if len(registers) == 1:
             self.registered = True
-            return registers[0].get('data')
+            return registers[0]
 
         if len(registers) > 1:
             secho("[o] Got more than one record for the same version. Last registery will be taken",fg='yellow')
             self.registered = True
-            return registers[-1].get('data')
+            return registers[-1]
         
         secho("[-] No user with that public key registered", fg='red')
         self.registered = False
@@ -149,63 +156,55 @@ class Patient(object):
 
     def get_medblocks(self):
         """Gets all medblocks where 'patient' address is current patient's"""
-        if self.records is None:
-            self.records = bdb.assets.get(search=self.bio['bigchain'])
-    
+        self.records = None
+        if self.records is None and self.bio is not None:
+            # self.records = bdb.assets.get(search=self.bio['bigchain'])
+            self.records = transactions.find({"patient":self.bio['bigchain']})
         for record in self.records:
-            if record.get('data').get('schema') == 'medblocks.medblock' and record.get('data')['patient'] == self.bio['bigchain']:
+            if record['schema'] == 'medblocks.medblock' and record['patient'] == self.bio['bigchain']:
                 self.medblocks.append(record)
-
         self.medblocks = version_filter(self.medblocks)
         keyed_blocks = []
         non_keyed = []
         for medblock in self.medblocks:
-            asset_id = medblock['id']
-            keys = self.get_keys(asset_id)
-            medblock['owned'] = self.owner_is_patient(asset_id)
+            asset_id = medblock.get('_id')
+            keys = self.get_keys(medblock)
+            medblock['owned'] = self.owner_is_patient(medblock)
             if len(keys) > 0:
                 medblock['keys']=keys
                 keyed_blocks.append(medblock)
             else:
                 non_keyed.append(medblock)
         
+        
         self.medblocks = keyed_blocks
         self.non_keyed = non_keyed
         
     def has_permission(self, medblock):
         current_user = load()
+        echo(current_user['bigchain'].public_key)
         if current_user['bigchain'].public_key in medblock['keys'].keys():
             return medblock['keys'][current_user['bigchain'].public_key]
         return False
     
-    def get_owner(self, asset_id):
-        txns = bdb.transactions.get(asset_id=asset_id)
-        return txns[-1]['outputs'][0]['condition']['details']['public_key']
-    
-    def owner_is_patient(self, asset_id):
-        owner = self.get_owner(asset_id)
+    def owner_is_patient(self, medblock):
+        owner = medblock['patient']
         if owner == self.bio['bigchain']:
             return True
         else:
             return False
     
-    def get_keys(self, asset_id):
-        keys = {}
-        txns = bdb.transactions.get(asset_id=asset_id)
-        for tx in txns:
-            meta = tx.get('metadata')
-            if meta is not None:
-                for k in meta['keys']:
-                    keys[k] = meta['keys'][k]
-        return keys
-    
+    def get_keys(self, medblock):
+        r = medblock['keys'] if (medblock['keys'] is not None) else []
+        return r
+
     def display_medblocks(self):
         for i, medblock in enumerate(self.medblocks):
-            echo("------------------------------------Medblock {}------------------------------------".format(i+1))
-            secho("ID: {}".format(medblock['id']), fg='yellow')
-            echo("IPFS hash: {}".format(medblock['data']['ipfs_hash']))
-            echo("File Format: {}".format(medblock['data']['type']))
-            keys = self.get_keys(medblock['id'])
+            echo("------------------------------------ROX {}------------------------------------".format(i+1))
+            secho("ID: {}".format(medblock.get('_id')), fg='yellow')
+            echo("IPFS hash: {}".format(medblock['ipfs_hash']))
+            echo("File Format: {}".format(medblock['type']))
+            keys = self.get_keys(medblock)
             if emergency_address in keys.keys():
                 secho("**EMERGENCY BLOCK**", fg='red')
             echo("Permitted addresses: {}".format(len(keys)))
@@ -218,75 +217,81 @@ class Patient(object):
     def write_medblock(self, ipfs_hash, encrypted_key, emergency_key=None, format=None):
         current_user = load()
         data = {
-        'schema':'medblocks.medblock',
-        'version':'v0.01',
-        'type': format,
-        'ipfs_hash': ipfs_hash,
-        'patient': self.bio['bigchain']
-        }
-        metadata = {
-            'schema':'medblocks.aes', 
+            'schema':'medblocks.medblock',
+            'version':'v0.01',
+            'type': format,
+            'ipfs_hash': ipfs_hash,
+            'patient': self.bio['bigchain'],
             'keys': {
                 self.bio['bigchain']: encrypted_key
-                }
+            }
         }
 
         if emergency_key is not None:
-            metadata['keys'][emergency_address] = emergency_key
+            data['keys'][emergency_address] = emergency_key
         
         echo("[+] Preparing CREATE transaction with {}...".format(str(data)[:10]))
-        tx = bdb.transactions.prepare(
+        '''tx = bdb.transactions.prepare(
         operation='CREATE',
         signers=current_user['bigchain'].public_key,
         asset={'data': data},
         metadata=metadata
-        )
+        )'''
         echo("[+] Signing with private key")
-        signed_tx = bdb.transactions.fulfill(
+        '''signed_tx = bdb.transactions.fulfill(
         tx,
         private_keys=current_user['bigchain'].private_key
-        )
+        )'''
         echo("[+] Creating MedBlock on the Blockchain")
-        sent = bdb.transactions.send(signed_tx)
-        echo("[+] Created: {}".format(sent['id']))
-        self.transfer_medblock(sent)
+        
+        # sent = bdb.transactions.send(signed_tx)
+        sent = transactions.insert(data)
+        echo("[+] Created: {}".format(sent))
+        # self.transfer_medblock(sent)
     
     def transfer_medblock(self, tx, metadata=None):
         current_user = load()
         echo("[+] Transfering MedBlock to patient: {}".format(self.bio['bigchain']))
-        output = tx['outputs'][0]
-        transfer_input = {
-            'fulfillment': output['condition']['details'],
-            'fulfills': {
-                'output_index': 0,
-                'transaction_id': tx['id'],},
-            'owners_before': output['public_keys'],}
-        if tx['operation'] == 'TRANSFER':
-            asset_id = tx['asset']['id']
-        else:
-            asset_id = tx['id']
+        # output = tx['outputs'][0]
+        # transfer_input = {
+        #     'fulfillment': output['condition']['details'],
+        #     'fulfills': {
+        #         'output_index': 0,
+        #         'transaction_id': tx['id'],},
+        #     'owners_before': output['public_keys'],}
+        # if tx['operation'] == 'TRANSFER':
+        #     asset_id = tx['asset']['id']
+        # else:
+        #     asset_id = tx['id']
 
-        transfer_asset = {
-            'id':asset_id,
-        }
+        # transfer_asset = {
+        #     'id':asset_id,
+        # }
         echo("[+] Preparing TRANSFER transaction with encrypted key")
-        if metadata is None:
-            prepared_tx = bdb.transactions.prepare(
-                operation='TRANSFER',
-                asset=transfer_asset,
-                inputs=transfer_input,
-                recipients=self.bio['bigchain'],
-            )
-        else:
-            prepared_tx = bdb.transactions.prepare(
-                operation='TRANSFER',
-                asset=transfer_asset,
-                inputs=transfer_input,
-                recipients=self.bio['bigchain'],
-                metadata=metadata
-            )
-        echo("[+] Signing transaction")
-        signed = bdb.transactions.fulfill(
+        if metadata is not None:
+            # prepared_tx = bdb.transactions.prepare(
+            #     operation='TRANSFER',
+            #     asset=transfer_asset,
+            #     inputs=transfer_input,
+            #     recipients=self.bio['bigchain'],
+            # )
+        # else:
+            document = transactions.find({'_id':ObjectId(tx.get('_id'))})[0]
+            keys = metadata['keys'].keys()
+            for key in keys:
+                document['keys'][key] = metadata['keys'][key]
+
+            transactions.update_one({'_id': ObjectId(tx.get('_id'))}, {'$set' : {'keys':document['keys']}})
+            # prepared_tx = bdb.transactions.prepare(
+            #     operation='TRANSFER',
+            #     asset=transfer_asset,
+            #     inputs=transfer_input,
+            #     recipients=self.bio['bigchain'],
+            #     metadata=metadata
+            # )
+
+
+        '''signed = bdb.transactions.fulfill(
             prepared_tx,
             private_keys=current_user['bigchain'].private_key
         )
@@ -298,8 +303,8 @@ class Patient(object):
             echo("[o] Waiting for the asset block to confirm on blockchain. Sleeping for 0.5...")
             time.sleep(0.5)
         echo("[+] Sending on the blockchain")
-        tx = bdb.transactions.send(signed)
-        secho("[+] Transaction sent: {}".format(tx['id'], fg='green'))
+        '''
+        secho("[+] Transaction sent: {}", fg='green')
 
 
 def ipfs_connect():
@@ -338,6 +343,10 @@ def createuser(name, phone, output):
     echo("[+] Writing file to disk as: {}".format(output))
     with open(output,'w') as f:
         f.write(st)
+@main.command()
+def checkserver():
+    """f your s dog"""
+
 
 @main.command()
 def register():
@@ -371,6 +380,7 @@ def info():
     
     echo("[+] Loading all records of user on the blockchain")
     publicpatient = Patient(public_key=user['bigchain'].public_key)
+
     if publicpatient.registered:
         secho('Registered on the Blockchain!', fg='green')
     else:
@@ -442,14 +452,14 @@ def add(file, phone, address, emergency):
 def permit(asset, address, phone, all):
         """Permit someone to decrypt a medblock"""
         doctor = get_patient(address, phone)
-        recorded_keys = doctor.get_keys(asset)
+        medblock = transactions.find({"_id" : ObjectId(asset)})[0]
+        recorded_keys = doctor.get_keys(medblock)
         if doctor.bio['bigchain'] in recorded_keys:
             echo("[+] Permission already granted")
             exit()
         current_user = load()
         user_patient = Patient(public_key=current_user['bigchain'].public_key)
-        if user_patient.owner_is_patient(asset):
-            tx = bdb.transactions.get(asset_id=asset)[-1]
+        if user_patient.owner_is_patient(medblock):
             public_rsa = doctor.bio['rsa']
             echo("[+] Got Public RSA key")
             secho(public_rsa, fg='green')
@@ -459,12 +469,12 @@ def permit(asset, address, phone, all):
             # Decrypt key
             echo("[+] Decrypting AES key using private key")
             decrypted_key = decrypt_rsa(encrypted_key.encode(), current_user['rsa'])
-            echo("[+] Decrypted : {}".format(decrypted_key))
+            echo("[+] Decrypted : {}".format(decrypted_key)) 
             click.pause()
             echo("[+] Encrypting AES key with RSA public key")
             encrypted_key = encrypt_rsa(decrypted_key, public_rsa)
             encrypted_key = encrypted_key.decode()
-            user_patient.transfer_medblock(tx,metadata={
+            user_patient.transfer_medblock(medblock,metadata={
                                             'schema':'medblocks.aes', 
                                             'keys': {
                                                 doctor.bio['bigchain']: encrypted_key
@@ -479,11 +489,10 @@ def get(asset, output):
     """Retrive and decrypt medblock"""
     current_user = load()
     user_patient = Patient(public_key=current_user['bigchain'].public_key)
-    keys = user_patient.get_keys(asset)
+    data =  transactions.find({"_id" : ObjectId(asset)})[0]
+    keys = user_patient.get_keys(data)
     if current_user['bigchain'].public_key in keys.keys():
-        secho("[+] Current user has permission to decrypt", fg='green')
-        data = bdb.transactions.get(asset_id=asset)[0]['asset']['data']
-        
+        secho("[+] Current user has permission to decrypt", fg='green')        
         
         echo("[+] Decrypting AES key")
         encrypted_key = keys[current_user['bigchain'].public_key]
